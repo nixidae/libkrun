@@ -2808,12 +2808,20 @@ impl FileSystem for PassthroughFs {
         let file = self.open_inode(inode, open_flags)?;
         let fd = file.as_raw_fd();
 
+        // hv_vm_map() refuses a MAP_SHARED file mapping, whatever its protection, and takes a
+        // MAP_PRIVATE one (measured on macOS 27). A private mapping that nothing writes reads
+        // the file's own pages, so a read-only window still shares the host's page cache.
+        let share_flags = if (flags & fuse::SetupmappingFlags::WRITE.bits()) != 0 {
+            libc::MAP_SHARED
+        } else {
+            libc::MAP_PRIVATE
+        };
         let host_addr = unsafe {
             libc::mmap(
                 null_mut(),
                 len as usize,
                 prot_flags,
-                libc::MAP_SHARED,
+                share_flags,
                 fd,
                 foffset as libc::off_t,
             )
