@@ -1312,6 +1312,7 @@ pub fn build_microvm(
             &exit_evt,
             vcpu_list.clone(),
             vm_resources.nested_enabled,
+            vm_resources.tso_enabled,
         )
         .map_err(StartMicrovmError::Internal)?;
 
@@ -2509,6 +2510,7 @@ fn create_vcpus_aarch64(
     exit_evt: &EventFd,
     vcpu_list: Arc<VcpuList>,
     nested_enabled: bool,
+    tso_enabled: bool,
 ) -> super::Result<Vec<Vcpu>> {
     let mut vcpus = Vec::with_capacity(vcpu_config.vcpu_count as usize);
     let mut boot_senders: HashMap<u64, Sender<u64>> = HashMap::new();
@@ -2531,6 +2533,7 @@ fn create_vcpus_aarch64(
             nested_enabled,
         )
         .map_err(Error::Vcpu)?;
+        vcpu.set_tso(tso_enabled);
 
         vcpu.configure_aarch64(mem_info).map_err(Error::Vcpu)?;
 

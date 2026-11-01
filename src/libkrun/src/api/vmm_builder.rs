@@ -31,6 +31,7 @@ pub struct VmmBuilder<'a> {
     serial_consoles: Vec<SerialConsoleConfig>,
     kernel_console: Option<String>,
     nested_virt: bool,
+    tso: bool,
     split_irqchip: bool,
     acpi: bool,
     smbios_oem_strings: Vec<String>,
@@ -103,6 +104,16 @@ impl<'a> VmmBuilder<'a> {
     pub fn nested_virt(mut self, enabled: bool) -> Self {
         self.nested_virt = enabled;
         self
+    }
+
+    /// Run the vCPUs in the TSO memory model, which translated x86 code such as Rosetta's
+    /// expects. Only Hypervisor.framework on Apple silicon offers it, from macOS 15.
+    pub fn tso(mut self, enabled: bool) -> Result<Self, VmmError> {
+        if enabled && !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+            return Err(VmmError::InvalidParam());
+        }
+        self.tso = enabled;
+        Ok(self)
     }
 
     pub fn split_irqchip(mut self, enabled: bool) -> Result<Self, VmmError> {
@@ -413,6 +424,7 @@ fn build_vm(builder_cfg: VmmBuilder<'_>) -> Result<Vmm<'_>, VmmError> {
     vm_resources.kernel_cmdline.prolog = Some(payload.cmdline);
 
     vm_resources.nested_enabled = builder_cfg.nested_virt;
+    vm_resources.tso_enabled = builder_cfg.tso;
     vm_resources.split_irqchip = builder_cfg.split_irqchip;
     vm_resources.acpi_enabled = builder_cfg.acpi;
     if !builder_cfg.smbios_oem_strings.is_empty() {

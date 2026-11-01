@@ -114,6 +114,8 @@ pub struct VmResources {
     pub smbios_oem_strings: Option<Vec<String>>,
     /// Whether to enable nested virtualization.
     pub nested_enabled: bool,
+    /// Whether the vCPUs run in the TSO memory model (macOS only).
+    pub tso_enabled: bool,
     /// Whether to enable split irqchip
     pub split_irqchip: bool,
     /// Whether to expose ACPI tables (x86_64). When disabled, virtio-mmio devices are
@@ -267,6 +269,7 @@ mod tests {
             external_kernel: None,
             smbios_oem_strings: None,
             nested_enabled: false,
+            tso_enabled: false,
             split_irqchip: false,
             acpi_enabled: false,
             serial_consoles: Vec::new(),

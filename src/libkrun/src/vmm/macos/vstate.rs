@@ -253,6 +253,7 @@ pub struct Vcpu {
 
     vcpu_list: Arc<VcpuList>,
     nested_enabled: bool,
+    tso_enabled: bool,
 }
 
 impl Vcpu {
@@ -348,7 +349,13 @@ impl Vcpu {
             response_sender,
             vcpu_list,
             nested_enabled,
+            tso_enabled: false,
         })
+    }
+
+    /// Runs this vCPU in the TSO memory model from its first instruction.
+    pub fn set_tso(&mut self, enabled: bool) {
+        self.tso_enabled = enabled;
     }
 
     /// Returns the cpu index as seen by the guest OS.
@@ -514,6 +521,11 @@ impl Vcpu {
         hvf_vcpu
             .set_initial_state(self.ipa_size, entry_addr, self.fdt_addr)
             .unwrap_or_else(|_| panic!("Can't set HVF vCPU {hvf_vcpuid} initial state"));
+        if self.tso_enabled {
+            hvf_vcpu
+                .enable_tso()
+                .unwrap_or_else(|_| panic!("Can't enable TSO on HVF vCPU {hvf_vcpuid}"));
+        }
 
         loop {
             // An out-of-band pause request breaks the vCPU out of HVF via

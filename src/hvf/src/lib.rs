@@ -51,6 +51,8 @@ const PSR_D_BIT: u64 = 0x0000_0200;
 const PSTATE_EL1_FAULT_BITS_64: u64 = PSR_MODE_EL1H | PSR_A_BIT | PSR_F_BIT | PSR_I_BIT | PSR_D_BIT;
 const PSTATE_EL2_FAULT_BITS_64: u64 = PSR_MODE_EL2H | PSR_A_BIT | PSR_F_BIT | PSR_I_BIT | PSR_D_BIT;
 
+const ACTLR_EL1_EN_TSO: u64 = 1 << 1;
+
 const HCR_TLOR: u64 = 1 << 35;
 const HCR_RW: u64 = 1 << 31;
 const HCR_TSW: u64 = 1 << 22;
@@ -553,6 +555,35 @@ impl HvfVcpu<'_> {
         }
 
         let ret = unsafe { hv_vcpu_set_reg(self.vcpuid, hv_reg_t_HV_REG_X0, fdt_addr) };
+        if ret != HV_SUCCESS {
+            return Err(Error::VcpuInitialRegisters);
+        }
+
+        Ok(())
+    }
+
+    /// Runs the vCPU in the TSO memory model, the one x86 code expects.
+    ///
+    /// Hypervisor.framework lets a VMM set only this bit of ACTLR_EL1, from macOS 15.
+    pub fn enable_tso(&self) -> Result<(), Error> {
+        let mut val: u64 = 0;
+        let ret = unsafe {
+            hv_vcpu_get_sys_reg(
+                self.vcpuid,
+                hv_sys_reg_t_HV_SYS_REG_ACTLR_EL1,
+                &mut val as *mut _,
+            )
+        };
+        if ret != HV_SUCCESS {
+            return Err(Error::VcpuInitialRegisters);
+        }
+        let ret = unsafe {
+            hv_vcpu_set_sys_reg(
+                self.vcpuid,
+                hv_sys_reg_t_HV_SYS_REG_ACTLR_EL1,
+                val | ACTLR_EL1_EN_TSO,
+            )
+        };
         if ret != HV_SUCCESS {
             return Err(Error::VcpuInitialRegisters);
         }
