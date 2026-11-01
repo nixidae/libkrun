@@ -71,6 +71,7 @@ impl io::Write for ZCWriter<'_> {
 pub struct Server<F: FileSystem + Sync> {
     fs: F,
     options: AtomicU64,
+    inode_dax: bool,
 }
 
 impl<F: FileSystem + Sync> Server<F> {
@@ -78,7 +79,33 @@ impl<F: FileSystem + Sync> Server<F> {
         Server {
             fs,
             options: AtomicU64::new(FsOptions::empty().bits()),
+            inode_dax: false,
         }
+    }
+
+    /// Offer per-file DAX, and mark every regular file for it. A guest that mounts the share
+    /// with no `dax=` option then maps its files through the DAX window instead of copying
+    /// them into its page cache, and needs no option that a device without a window would
+    /// refuse.
+    pub fn with_inode_dax(mut self, enabled: bool) -> Server<F> {
+        self.inode_dax = enabled;
+        self
+    }
+
+    fn reply_attr(&self, mut attr: Attr) -> Attr {
+        const S_IFMT: u32 = 0o170_000;
+        const S_IFREG: u32 = 0o100_000;
+        let options = FsOptions::from_bits_truncate(self.options.load(Ordering::Relaxed));
+        if options.contains(FsOptions::HAS_INODE_DAX) && attr.mode & S_IFMT == S_IFREG {
+            attr.flags |= ATTR_DAX;
+        }
+        attr
+    }
+
+    fn entry_out(&self, entry: Entry) -> EntryOut {
+        let mut out = EntryOut::from(entry);
+        out.attr = self.reply_attr(out.attr);
+        out
     }
 
     #[allow(clippy::cognitive_complexity)]
@@ -203,7 +230,7 @@ impl<F: FileSystem + Sync> Server<F> {
             .lookup(Context::from(in_header), in_header.nodeid.into(), name)
         {
             Ok(entry) => {
-                let out = EntryOut::from(entry);
+                let out = self.entry_out(entry);
 
                 reply_ok(Some(out), None, in_header.unique, w)
             }
@@ -239,7 +266,7 @@ impl<F: FileSystem + Sync> Server<F> {
                     attr_valid: timeout.as_secs(),
                     attr_valid_nsec: timeout.subsec_nanos(),
                     dummy: 0,
-                    attr: st.into(),
+                    attr: self.reply_attr(st.into()),
                 };
                 reply_ok(Some(out), None, in_header.unique, w)
             }
@@ -272,7 +299,7 @@ impl<F: FileSystem + Sync> Server<F> {
                     attr_valid: timeout.as_secs(),
                     attr_valid_nsec: timeout.subsec_nanos(),
                     dummy: 0,
-                    attr: st.into(),
+                    attr: self.reply_attr(st.into()),
                 };
                 reply_ok(Some(out), None, in_header.unique, w)
             }
@@ -320,7 +347,7 @@ impl<F: FileSystem + Sync> Server<F> {
             extensions,
         ) {
             Ok(entry) => {
-                let out = EntryOut::from(entry);
+                let out = self.entry_out(entry);
 
                 reply_ok(Some(out), None, in_header.unique, w)
             }
@@ -357,7 +384,7 @@ impl<F: FileSystem + Sync> Server<F> {
             extensions,
         ) {
             Ok(entry) => {
-                let out = EntryOut::from(entry);
+                let out = self.entry_out(entry);
 
                 reply_ok(Some(out), None, in_header.unique, w)
             }
@@ -391,7 +418,7 @@ impl<F: FileSystem + Sync> Server<F> {
             extensions,
         ) {
             Ok(entry) => {
-                let out = EntryOut::from(entry);
+                let out = self.entry_out(entry);
 
                 reply_ok(Some(out), None, in_header.unique, w)
             }
@@ -507,7 +534,7 @@ impl<F: FileSystem + Sync> Server<F> {
             bytes_to_cstr(&name)?,
         ) {
             Ok(entry) => {
-                let out = EntryOut::from(entry);
+                let out = self.entry_out(entry);
 
                 reply_ok(Some(out), None, in_header.unique, w)
             }
@@ -915,6 +942,10 @@ impl<F: FileSystem + Sync> Server<F> {
             supported |= FsOptions::SECURITY_CTX;
         }
 
+        if self.inode_dax {
+            supported |= FsOptions::HAS_INODE_DAX;
+        }
+
         let flags_64 = ((flags2 as u64) << 32) | (flags as u64);
         let capable = FsOptions::from_bits_truncate(flags_64);
 
@@ -1016,7 +1047,7 @@ impl<F: FileSystem + Sync> Server<F> {
                 fh.into(),
                 size,
                 offset,
-                |d, e| add_dirent(&mut cursor, size, d, Some(e)),
+                |d, e| add_dirent(&mut cursor, size, d, Some(self.entry_out(e))),
             )
         } else {
             self.fs.readdir(
@@ -1164,7 +1195,7 @@ impl<F: FileSystem + Sync> Server<F> {
                     attr_valid: entry.attr_timeout.as_secs(),
                     entry_valid_nsec: entry.entry_timeout.subsec_nanos(),
                     attr_valid_nsec: entry.attr_timeout.subsec_nanos(),
-                    attr: entry.attr.into(),
+                    attr: self.reply_attr(entry.attr.into()),
                 };
                 let open_out = OpenOut {
                     fh: handle.map(Into::into).unwrap_or(0),
@@ -1514,7 +1545,7 @@ fn add_dirent(
     cursor: &mut Writer,
     max: u32,
     d: DirEntry,
-    entry: Option<Entry>,
+    entry: Option<EntryOut>,
 ) -> io::Result<usize> {
     if d.name.len() > u32::MAX as usize {
         return Err(linux_error(io::Error::from_raw_os_error(libc::EOVERFLOW)));
@@ -1543,7 +1574,7 @@ fn add_dirent(
         Ok(0)
     } else {
         if let Some(entry) = entry {
-            cursor.write_all(EntryOut::from(entry).as_slice())?;
+            cursor.write_all(entry.as_slice())?;
         }
 
         let dirent = Dirent {

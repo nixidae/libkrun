@@ -112,11 +112,12 @@ impl FsWorker {
         let server = match passthrough_cfg {
             Some(cfg) if read_only => {
                 let inner = PassthroughFsRo::new(cfg, inode_alloc.clone(), allowlist)?;
-                FsServer::ReadOnly(Server::new(AugmentFs::new(
-                    inner,
-                    &inode_alloc,
-                    virtual_entries,
-                )))
+                // Read-only only: on macOS a writable window needs a MAP_SHARED mapping,
+                // which hv_vm_map() refuses.
+                FsServer::ReadOnly(
+                    Server::new(AugmentFs::new(inner, &inode_alloc, virtual_entries))
+                        .with_inode_dax(shm_region.is_some()),
+                )
             }
             Some(cfg) => {
                 let inner = PassthroughFs::new(cfg, inode_alloc.clone())?;

@@ -531,6 +531,9 @@ pub const FUSE_COMPAT_22_INIT_OUT_SIZE: u32 = 24;
 /// Object is a submount root
 pub const ATTR_SUBMOUNT: u32 = 1;
 
+/// Enable DAX for this file in per-file DAX mode
+pub const ATTR_DAX: u32 = 1 << 1;
+
 /// Kill suid and sgid if executable
 pub const OPEN_KILL_SUIDGID: u32 = 1;
 
