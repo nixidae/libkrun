@@ -159,6 +159,20 @@ impl Fs {
         Ok(true)
     }
 
+    #[cfg(target_os = "macos")]
+    pub fn set_rosetta(&mut self, enabled: bool) -> bool {
+        let Some(cfg) = self.passthrough_cfg.as_mut() else {
+            return false;
+        };
+        cfg.rosetta = enabled;
+        true
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub fn set_rosetta(&mut self, enabled: bool) -> bool {
+        !enabled
+    }
+
     pub fn set_export_table(&mut self, export_table: ExportTable) -> u64 {
         static FS_UNIQUE_ID: AtomicU64 = AtomicU64::new(0);
 

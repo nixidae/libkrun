@@ -723,6 +723,18 @@ impl<'a> FsDevice<'a> {
             Err(e) => Err(VmmError::Internal(format!("allowlist {path}: {e}"))),
         }
     }
+
+    /// Answer the ioctls Rosetta for Linux sends to the share that holds it, as
+    /// Virtualization.framework does. Share the host's
+    /// `/Library/Apple/usr/libexec/oah/RosettaLinux` and run the vCPUs in the TSO memory model
+    /// with [`crate::api::VmmBuilder::tso`]: this device reports TSO to Rosetta without setting
+    /// it. macOS only; elsewhere, and on a NullFs device, returns `InvalidParam`.
+    pub fn set_rosetta(&mut self, enabled: bool) -> Result<(), VmmError> {
+        if !self.inner.lock().unwrap().set_rosetta(enabled) {
+            return Err(VmmError::InvalidParam());
+        }
+        Ok(())
+    }
 }
 
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]

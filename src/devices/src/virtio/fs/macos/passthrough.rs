@@ -13,7 +13,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::ptr::null_mut;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -40,6 +40,24 @@ const SECURITY_CAPABILITY: &[u8] = b"security.capability\0";
 const MACOS_XATTR_PREFIX: &[u8] = b"com.apple.";
 
 const UID_MAX: u32 = u32::MAX - 1;
+
+// Rosetta for Linux opens /proc/self/exe, its own binary on the Rosetta share, and sends these
+// ioctls to the share's server, which Virtualization.framework answers. Read from the
+// disassembly of the macOS 27.0.1 rosetta.
+//
+// _IOR('a', 0x25, [u8; 69]): Rosetta refuses to start unless the reply equals a NUL-terminated
+// string that its own binary holds. 0x22 is the same check in the 2022 builds.
+const ROSETTA_IOCTL_CHECK: u32 = 0x8045_6125;
+const ROSETTA_IOCTL_CHECK_LEGACY: u32 = 0x8045_6122;
+// The reply is read from the host's rosetta binary on the share, so this source carries no Apple
+// text. It directly follows an ELF magic: the macOS 27.0.1 rosetta holds two magics, and only
+// the second is followed by a string of the ioctl's length.
+const ELF_MAGIC: [u8; 4] = *b"\x7fELF";
+const ROSETTA_CHECK_LEN: usize = 69;
+// _IO('a', 0x24): sent when prctl(PR_SET_MEM_MODEL, TSO) fails, to have the hypervisor run the
+// vCPUs in the TSO memory model. Rosetta accepts success or EOPNOTSUPP, and stops on any other
+// error.
+const ROSETTA_IOCTL_TSO: u32 = 0x0000_6124;
 
 type Inode = u64;
 type Handle = u64;
@@ -557,6 +575,9 @@ pub struct Config {
     /// The permission semantics to be emulated. See the documentation for `PermissionSemantics` for
     /// more details.
     pub semantics: PermissionSemantics,
+
+    /// Whether to answer the ioctls Rosetta for Linux sends to the share that holds it.
+    pub rosetta: bool,
 }
 
 impl Default for Config {
@@ -572,6 +593,7 @@ impl Default for Config {
             export_fsid: 0,
             export_table: None,
             semantics: PermissionSemantics::LinuxComplete,
+            rosetta: false,
         }
     }
 }
@@ -594,7 +616,48 @@ pub struct PassthroughFs {
     // `cfg.writeback` is true and `init` was called with `FsOptions::WRITEBACK_CACHE`.
     writeback: AtomicBool,
     announce_submounts: AtomicBool,
+    // The reply to Rosetta's check, when `cfg.rosetta` is set and the share's rosetta binary
+    // holds it.
+    rosetta_reply: Option<Vec<u8>>,
     cfg: Config,
+}
+
+/// The string of `ROSETTA_CHECK_LEN` bytes after an ELF magic in `binary` that is text and
+/// then one NUL. A real ELF header has NULs in its ident, so it never matches. `None` when no
+/// string or more than one string matches: a wrong reply stops Rosetta and gives no reason.
+fn find_check_reply(binary: &[u8]) -> Option<Vec<u8>> {
+    let is_text = |s: &[u8]| {
+        std::str::from_utf8(s).is_ok_and(|t| t.chars().all(|c| c == '\n' || !c.is_control()))
+    };
+    let mut replies = binary
+        .windows(ELF_MAGIC.len())
+        .enumerate()
+        .filter(|(_, w)| *w == ELF_MAGIC)
+        .filter_map(|(at, _)| binary.get(at + ELF_MAGIC.len()..)?.get(..ROSETTA_CHECK_LEN))
+        .filter(|s| s.split_last().is_some_and(|(&nul, text)| nul == 0 && is_text(text)));
+    match (replies.next(), replies.next()) {
+        (Some(reply), None) => Some(reply.to_vec()),
+        _ => None,
+    }
+}
+
+fn read_rosetta_reply(root_dir: &str) -> Option<Vec<u8>> {
+    let path = Path::new(root_dir).join("rosetta");
+    let binary = match std::fs::read(&path) {
+        Ok(binary) => binary,
+        Err(e) => {
+            error!("cannot read {}: {e}", path.display());
+            return None;
+        }
+    };
+    let reply = find_check_reply(&binary);
+    if reply.is_none() {
+        error!(
+            "{} holds no single reply to its check, so Rosetta will not start",
+            path.display()
+        );
+    }
+    reply
 }
 
 impl PassthroughFs {
@@ -626,6 +689,11 @@ impl PassthroughFs {
 
             writeback: AtomicBool::new(false),
             announce_submounts: AtomicBool::new(false),
+            rosetta_reply: if cfg.rosetta {
+                read_rosetta_reply(&cfg.root_dir)
+            } else {
+                None
+            },
             cfg,
         })
     }
@@ -2629,6 +2697,37 @@ impl FileSystem for PassthroughFs {
         Ok(())
     }
 
+    fn ioctl(
+        &self,
+        _ctx: Context,
+        _inode: Inode,
+        _handle: Handle,
+        _flags: u32,
+        cmd: u32,
+        _arg: u64,
+        _in_size: u32,
+        out_size: u32,
+        _exit_code: &Arc<AtomicI32>,
+    ) -> io::Result<Vec<u8>> {
+        if !self.cfg.rosetta {
+            return Err(io::Error::from_raw_os_error(bindings::LINUX_ENOSYS));
+        }
+        match cmd {
+            ROSETTA_IOCTL_CHECK | ROSETTA_IOCTL_CHECK_LEGACY
+                if out_size as usize == ROSETTA_CHECK_LEN =>
+            {
+                self.rosetta_reply
+                    .clone()
+                    .ok_or_else(|| linux_error(io::Error::from_raw_os_error(libc::ENOTTY)))
+            }
+            // The VMM, not this device, sets the memory model; see VmmBuilder::tso().
+            ROSETTA_IOCTL_TSO => Ok(Vec::new()),
+            // Includes _IOR('a', 0x23, [u8; 128]), the optional settings of rosettad's
+            // translation cache, which Rosetta does without.
+            _ => Err(linux_error(io::Error::from_raw_os_error(libc::ENOTTY))),
+        }
+    }
+
     fn lseek(
         &self,
         _ctx: Context,
@@ -2798,5 +2897,52 @@ impl FileSystem for PassthroughFs {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ELF_MAGIC, ROSETTA_CHECK_LEN, find_check_reply};
+
+    // Text with a newline and a two-byte character, as in rosetta's reply, then the NUL.
+    fn reply() -> Vec<u8> {
+        let mut reply = "line\n\u{e9}".as_bytes().to_vec();
+        reply.resize(ROSETTA_CHECK_LEN - 1, b'a');
+        reply.push(0);
+        reply
+    }
+
+    fn after_magic(s: &[u8]) -> Vec<u8> {
+        [&ELF_MAGIC[..], s].concat()
+    }
+
+    #[test]
+    fn finds_the_reply_after_an_embedded_elf_header() {
+        let reply = reply();
+
+        let mut binary = Vec::new();
+        // A real ELF header: the magic and e_ident, whose NULs make it a non-match on its own.
+        binary.extend_from_slice(&ELF_MAGIC);
+        binary.extend_from_slice(&[2, 1, 1, 0, 0, 0, 0, 0]);
+        // An embedded image followed by the reply, as in rosetta.
+        binary.extend_from_slice(&ELF_MAGIC);
+        binary.extend_from_slice(&reply);
+        // A reply-shaped string with no magic before it.
+        binary.extend_from_slice(b"\x46\x01");
+        binary.extend_from_slice(&reply);
+
+        assert_eq!(find_check_reply(&binary).as_deref(), Some(&reply[..]));
+        assert_eq!(find_check_reply(b"no magic, only strings\0"), None);
+        assert_eq!(find_check_reply(&after_magic(&reply[..ROSETTA_CHECK_LEN - 2])), None);
+    }
+
+    #[test]
+    fn refuses_a_control_byte_and_a_second_match() {
+        let mut control = reply();
+        control[1] = 0x01;
+        assert_eq!(find_check_reply(&after_magic(&control)), None);
+
+        let twice = [after_magic(&reply()), after_magic(&reply())].concat();
+        assert_eq!(find_check_reply(&twice), None);
     }
 }
