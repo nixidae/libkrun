@@ -302,6 +302,15 @@ typedef KrunResult (*krun_fs_device_set_cache_policy_fn)(KrunFsDevice handle, ui
  */
 KrunResult krun_fs_device_set_allowlist_file(KrunFsDevice handle, KrunStr path, KrunError* err_out);
 typedef KrunResult (*krun_fs_device_set_allowlist_file_fn)(KrunFsDevice handle, KrunStr path, KrunError* err_out);
+/**
+ * Answer the ioctls Rosetta for Linux sends to the share that holds it, as
+ * Virtualization.framework does. Share the host's
+ * `/Library/Apple/usr/libexec/oah/RosettaLinux` and run the vCPUs in the TSO memory model
+ * with [`crate::api::VmmBuilder::tso`]: this device reports TSO to Rosetta without setting
+ * it. macOS only; elsewhere, and on a NullFs device, returns `InvalidParam`.
+ */
+KrunResult krun_fs_device_set_rosetta(KrunFsDevice handle, bool enabled, KrunError* err_out);
+typedef KrunResult (*krun_fs_device_set_rosetta_fn)(KrunFsDevice handle, bool enabled, KrunError* err_out);
 void krun_fs_device_destroy(KrunFsDevice handle);
 typedef void (*krun_fs_device_destroy_fn)(KrunFsDevice handle);
 
@@ -464,6 +473,12 @@ KrunResult krun_vmm_builder_add_serial_console(KrunVmmBuilder* handle, int input
 typedef KrunResult (*krun_vmm_builder_add_serial_console_fn)(KrunVmmBuilder* handle, int input_fd, int output_fd, KrunError* err_out);
 void krun_vmm_builder_nested_virt(KrunVmmBuilder* handle, bool enabled);
 typedef void (*krun_vmm_builder_nested_virt_fn)(KrunVmmBuilder* handle, bool enabled);
+/**
+ * Run the vCPUs in the TSO memory model, which translated x86 code such as Rosetta's
+ * expects. Only Hypervisor.framework on Apple silicon offers it, from macOS 15.
+ */
+KrunResult krun_vmm_builder_tso(KrunVmmBuilder* handle, bool enabled, KrunError* err_out);
+typedef KrunResult (*krun_vmm_builder_tso_fn)(KrunVmmBuilder* handle, bool enabled, KrunError* err_out);
 KrunResult krun_vmm_builder_split_irqchip(KrunVmmBuilder* handle, bool enabled, KrunError* err_out);
 typedef KrunResult (*krun_vmm_builder_split_irqchip_fn)(KrunVmmBuilder* handle, bool enabled, KrunError* err_out);
 /**

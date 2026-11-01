@@ -763,6 +763,31 @@
             "c_convention": "out_param"
           },
           "ffi_name": "krun_fs_device_set_allowlist_file"
+        },
+        {
+          "name": "set_rosetta",
+          "doc": [
+            " Answer the ioctls Rosetta for Linux sends to the share that holds it, as",
+            " Virtualization.framework does. Share the host's",
+            " `/Library/Apple/usr/libexec/oah/RosettaLinux` and run the vCPUs in the TSO memory model",
+            " with [`crate::api::VmmBuilder::tso`]: this device reports TSO to Rosetta without setting",
+            " it. macOS only; elsewhere, and on a NullFs device, returns `InvalidParam`."
+          ],
+          "receiver": "mut",
+          "params": [
+            {
+              "name": "enabled",
+              "param_kind": "regular",
+              "type": "bool"
+            }
+          ],
+          "ret": {
+            "return_kind": "result",
+            "ok": null,
+            "err_type": "VmmError",
+            "c_convention": "out_param"
+          },
+          "ffi_name": "krun_fs_device_set_rosetta"
         }
       ],
       "cfg": "not(any(feature = \"tee\", feature = \"aws-nitro\"))"
@@ -1564,6 +1589,30 @@
             "type": "Self"
           },
           "ffi_name": "krun_vmm_builder_nested_virt"
+        },
+        {
+          "name": "tso",
+          "doc": [
+            " Run the vCPUs in the TSO memory model, which translated x86 code such as Rosetta's",
+            " expects. Only Hypervisor.framework on Apple silicon offers it, from macOS 15."
+          ],
+          "receiver": "value",
+          "params": [
+            {
+              "name": "enabled",
+              "param_kind": "regular",
+              "type": "bool"
+            }
+          ],
+          "ret": {
+            "return_kind": "result",
+            "ok": {
+              "type": "Self"
+            },
+            "err_type": "VmmError",
+            "c_convention": "out_param"
+          },
+          "ffi_name": "krun_vmm_builder_tso"
         },
         {
           "name": "split_irqchip",
