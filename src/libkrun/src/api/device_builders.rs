@@ -798,6 +798,9 @@ impl<'a> AttachDevice<'a> for FsDevice<'a> {
             #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]
             if let Some(region) = ctx.resolved_shm_region() {
                 fs.set_shm_region(region.into());
+                // The DAX window's mappings go through the VMM worker on macOS.
+                #[cfg(target_os = "macos")]
+                fs.set_map_sender(ctx.map_sender().expect("macOS requires map_sender"));
             }
         }
 
