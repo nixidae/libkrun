@@ -201,7 +201,7 @@ pub fn arch_memory_regions(
         // To be filled later using GuestMemory.
         guest_last_addr: 0,
         page_size,
-        initrd_addr: ram_last_addr.min(MMIO_MEM_START) - initrd_size,
+        initrd_addr: (ram_last_addr.min(MMIO_MEM_START) - initrd_size) & !(page_size as u64 - 1),
         firmware_addr,
     };
     (info, regions)
