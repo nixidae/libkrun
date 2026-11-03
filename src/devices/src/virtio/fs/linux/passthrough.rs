@@ -851,10 +851,10 @@ impl FileSystem for PassthroughFs {
             self.writeback.store(true, Ordering::Relaxed);
         }
 
-        if capable.contains(FsOptions::SUBMOUNTS) {
-            opts |= FsOptions::SUBMOUNTS;
-            self.announce_submounts.store(true, Ordering::Relaxed);
-        }
+        // Submounts are never announced, as virtiofsd's
+        // --no-announce-submounts: overlayfs refuses an automount dentry
+        // as a lower layer, so a share with a submount below it could not
+        // be one.
 
         Ok(opts)
     }
