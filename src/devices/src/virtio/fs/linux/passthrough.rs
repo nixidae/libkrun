@@ -636,7 +636,18 @@ impl PassthroughFs {
             } else {
                 None
             };
-            RwLock::new(self.open_inode(inode, flags as i32)?)
+            // CAP_FOWNER in a user namespace covers only files whose owner
+            // is mapped into it, so O_NOATIME can still fail with EPERM.
+            let file = match self.open_inode(inode, flags as i32) {
+                Err(e)
+                    if e.raw_os_error() == Some(libc::EPERM)
+                        && flags & (libc::O_NOATIME as u32) != 0 =>
+                {
+                    self.open_inode(inode, (flags & !(libc::O_NOATIME as u32)) as i32)?
+                }
+                result => result?,
+            };
+            RwLock::new(file)
         };
 
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
