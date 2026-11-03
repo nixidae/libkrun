@@ -193,14 +193,33 @@ impl NetWorker {
         if let Err(e) = self.rx_q.event.read() {
             log::error!("Failed to get rx event from queue: {e:?}");
         }
-        if let Err(e) = self.rx_q.queue.disable_notification(&self.mem) {
-            error!("error disabling queue notifications: {e:?}");
-        }
-        if let Err(e) = self.process_rx() {
-            log::error!("Failed to process rx: {e:?} (triggered by queue event)")
-        };
-        if let Err(e) = self.rx_q.queue.enable_notification(&self.mem) {
-            error!("error disabling queue notifications: {e:?}");
+        self.process_rx_and_rearm("queue event");
+    }
+
+    /// Processes rx, and leaves the guest's notifications on exactly while a frame waits for
+    /// rx buffers. The backend socket is edge-triggered: once a frame is deferred, only the
+    /// guest's kick on new buffers resumes rx. With notifications off at that point, the guest
+    /// refills the queue without a kick, the proxy blocks on a full socket, and rx stops for good.
+    fn process_rx_and_rearm(&mut self, trigger: &str) {
+        loop {
+            if let Err(e) = self.rx_q.queue.disable_notification(&self.mem) {
+                error!("error disabling queue notifications: {e:?}");
+            }
+            if let Err(e) = self.process_rx() {
+                log::error!("Failed to process rx: {e:?} (triggered by {trigger})");
+            }
+            if !self.rx_has_deferred_frame {
+                return;
+            }
+            match self.rx_q.queue.enable_notification(&self.mem) {
+                // The guest added buffers before notifications were back on: no kick comes.
+                Ok(true) => continue,
+                Ok(false) => return,
+                Err(e) => {
+                    error!("error enabling queue notifications: {e:?}");
+                    return;
+                }
+            }
         }
     }
 
@@ -214,15 +233,7 @@ impl NetWorker {
     }
 
     fn process_backend_socket_readable(&mut self) {
-        if let Err(e) = self.rx_q.queue.enable_notification(&self.mem) {
-            error!("error disabling queue notifications: {e:?}");
-        }
-        if let Err(e) = self.process_rx() {
-            log::error!("Failed to process rx: {e:?} (triggered by backend socket readable)");
-        };
-        if let Err(e) = self.rx_q.queue.disable_notification(&self.mem) {
-            error!("error disabling queue notifications: {e:?}");
-        }
+        self.process_rx_and_rearm("backend socket readable");
     }
 
     fn process_backend_socket_writeable(&mut self) {
