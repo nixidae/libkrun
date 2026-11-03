@@ -695,6 +695,34 @@ impl<'a> FsDevice<'a> {
         }
         Ok(())
     }
+
+    /// Show the guest only the paths listed in `path`, one per line, of this
+    /// read-only share.
+    ///
+    /// A listed path is absolute and below the share's root, or relative to
+    /// it. A directory above a listed path shows only the names that lead to
+    /// one; a listed path and everything below it are shared unchanged. A host
+    /// can share its whole Nix store this way and list one closure (a
+    /// `closureInfo`'s `store-paths`).
+    ///
+    /// When a lookup misses and the file has changed, the device reads it
+    /// again, so a host shows the guest more paths while it runs by
+    /// appending them. The guest's kernel may keep a negative dentry for a
+    /// name it looked up before; dropping the guest's caches clears it.
+    ///
+    /// A writable share or a NullFs device returns `InvalidParam`.
+    pub fn set_allowlist_file(&mut self, path: &str) -> Result<(), VmmError> {
+        match self
+            .inner
+            .lock()
+            .unwrap()
+            .set_allowlist_file(std::path::Path::new(path))
+        {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(VmmError::InvalidParam()),
+            Err(e) => Err(VmmError::Internal(format!("allowlist {path}: {e}"))),
+        }
+    }
 }
 
 #[cfg(not(any(feature = "tee", feature = "aws-nitro")))]

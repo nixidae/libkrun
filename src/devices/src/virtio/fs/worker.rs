@@ -17,6 +17,7 @@ use utils::eventfd::EventFd;
 use vm_memory::GuestMemoryMmap;
 
 use super::super::{FsError, Queue};
+use super::allowlist::Allowlist;
 use super::augment_fs::AugmentFs;
 use super::defs::{HPQ_INDEX, REQ_INDEX};
 use super::descriptor_utils::{Reader, Writer};
@@ -101,6 +102,7 @@ impl FsWorker {
         shm_region: Option<VirtioShmRegion>,
         passthrough_cfg: Option<passthrough::Config>,
         read_only: bool,
+        allowlist: Option<Arc<Allowlist>>,
         virtual_entries: Vec<VirtualDirEntry<'static>>,
         stop_fd: EventFd,
         exit_code: Arc<AtomicI32>,
@@ -109,7 +111,7 @@ impl FsWorker {
         let inode_alloc = Arc::new(InodeAllocator::new());
         let server = match passthrough_cfg {
             Some(cfg) if read_only => {
-                let inner = PassthroughFsRo::new(cfg, inode_alloc.clone())?;
+                let inner = PassthroughFsRo::new(cfg, inode_alloc.clone(), allowlist)?;
                 FsServer::ReadOnly(Server::new(AugmentFs::new(
                     inner,
                     &inode_alloc,

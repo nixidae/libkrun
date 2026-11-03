@@ -19,6 +19,7 @@ use super::super::{
     VirtioShmRegion,
 };
 use super::ExportTable;
+use super::allowlist::Allowlist;
 use super::passthrough;
 use super::virtual_entry::VirtualDirEntry;
 use super::worker::FsWorker;
@@ -52,6 +53,7 @@ pub struct Fs {
     shm_region: Option<VirtioShmRegion>,
     passthrough_cfg: Option<passthrough::Config>,
     read_only: bool,
+    allowlist: Option<Arc<Allowlist>>,
     virtual_entries: Vec<VirtualDirEntry<'static>>,
     worker_thread: Option<JoinHandle<()>>,
     worker_stopfd: EventFd,
@@ -92,6 +94,7 @@ impl Fs {
             shm_region: None,
             passthrough_cfg: fs_cfg,
             read_only,
+            allowlist: None,
             virtual_entries,
             worker_thread: None,
             worker_stopfd: EventFd::new(EFD_NONBLOCK).map_err(FsError::EventFd)?,
@@ -139,6 +142,21 @@ impl Fs {
         };
         cfg.cache_policy = policy;
         true
+    }
+
+    /// Shows the guest only the paths `file` lists of this read-only share,
+    /// and reads `file` again when it changes: see `allowlist`. False for a
+    /// writable share and for one with no host directory.
+    pub fn set_allowlist_file(&mut self, file: &std::path::Path) -> std::io::Result<bool> {
+        let Some(cfg) = self.passthrough_cfg.as_ref() else {
+            return Ok(false);
+        };
+        if !self.read_only {
+            return Ok(false);
+        }
+        let root = std::path::Path::new(&cfg.root_dir);
+        self.allowlist = Some(Arc::new(Allowlist::from_file(root, file)?));
+        Ok(true)
     }
 
     pub fn set_export_table(&mut self, export_table: ExportTable) -> u64 {
@@ -249,6 +267,7 @@ impl VirtioDevice for Fs {
             self.shm_region.clone(),
             self.passthrough_cfg.clone(),
             self.read_only,
+            self.allowlist.clone(),
             virtual_entries,
             self.worker_stopfd.try_clone().unwrap(),
             self.exit_code.clone(),

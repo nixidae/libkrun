@@ -19,6 +19,7 @@ use std::time::Duration;
 #[cfg(target_os = "macos")]
 use utils::worker_message::WorkerMessage;
 
+use super::allowlist::{Allowlist, Visibility};
 use super::filesystem::{
     Context, DirEntry, Entry, Extensions, FileSystem, FsOptions, GetxattrReply, ListxattrReply,
     OpenOptions, SetattrValid, ZeroCopyReader, ZeroCopyWriter,
@@ -56,13 +57,37 @@ fn read_only_open_flags(flags: u32) -> io::Result<u32> {
 
 pub struct PassthroughFsRo {
     inner: PassthroughFs,
+    allowlist: Option<Arc<Allowlist>>,
 }
 
 impl PassthroughFsRo {
-    pub fn new(cfg: passthrough::Config, inode_alloc: Arc<InodeAllocator>) -> io::Result<Self> {
+    pub fn new(
+        cfg: passthrough::Config,
+        inode_alloc: Arc<InodeAllocator>,
+        allowlist: Option<Arc<Allowlist>>,
+    ) -> io::Result<Self> {
         Ok(Self {
             inner: PassthroughFs::new(cfg, inode_alloc)?,
+            allowlist,
         })
+    }
+
+    /// Whether a listing of directory `inode` may show `name`. Records a
+    /// shown entry that is itself a partial directory.
+    fn listed(&self, inode: Inode, name: &[u8], entry_inode: Option<Inode>) -> bool {
+        let Some(allowlist) = &self.allowlist else {
+            return true;
+        };
+        match allowlist.visibility(inode, name) {
+            Visibility::Unfiltered | Visibility::Shown { partial: false } => true,
+            Visibility::Shown { partial: true } => {
+                if let Some(child) = entry_inode {
+                    allowlist.record(inode, name, child);
+                }
+                true
+            }
+            Visibility::Hidden => false,
+        }
     }
 }
 
@@ -83,7 +108,20 @@ impl FileSystem for PassthroughFsRo {
     }
 
     fn lookup(&self, ctx: Context, parent: Inode, name: &CStr) -> io::Result<Entry> {
-        self.inner.lookup(ctx, parent, name)
+        let Some(allowlist) = &self.allowlist else {
+            return self.inner.lookup(ctx, parent, name);
+        };
+        match allowlist.visibility(parent, name.to_bytes()) {
+            Visibility::Hidden => Err(linux_errno::enoent()),
+            Visibility::Unfiltered | Visibility::Shown { partial: false } => {
+                self.inner.lookup(ctx, parent, name)
+            }
+            Visibility::Shown { partial: true } => {
+                let entry = self.inner.lookup(ctx, parent, name)?;
+                allowlist.record(parent, name.to_bytes(), entry.inode);
+                Ok(entry)
+            }
+        }
     }
 
     fn forget(&self, ctx: Context, inode: Inode, count: u64) {
@@ -210,8 +248,22 @@ impl FileSystem for PassthroughFsRo {
     where
         F: FnMut(DirEntry) -> io::Result<usize>,
     {
+        if !self.allowlist.as_ref().is_some_and(|a| a.is_partial(inode)) {
+            return self
+                .inner
+                .readdir(ctx, inode, handle, size, offset, add_entry);
+        }
+        let mut add_entry = add_entry;
+        // A hidden entry returns 1, not 0: the passthrough reads 0 as a
+        // full buffer and stops, as it does for "." and "..".
         self.inner
-            .readdir(ctx, inode, handle, size, offset, add_entry)
+            .readdir(ctx, inode, handle, size, offset, |entry| {
+                if self.listed(inode, entry.name, None) {
+                    add_entry(entry)
+                } else {
+                    Ok(1)
+                }
+            })
     }
 
     fn readdirplus<F>(
@@ -226,8 +278,26 @@ impl FileSystem for PassthroughFsRo {
     where
         F: FnMut(DirEntry, Entry) -> io::Result<usize>,
     {
+        if !self.allowlist.as_ref().is_some_and(|a| a.is_partial(inode)) {
+            return self
+                .inner
+                .readdirplus(ctx, inode, handle, size, offset, add_entry);
+        }
+        let mut add_entry = add_entry;
         self.inner
-            .readdirplus(ctx, inode, handle, size, offset, add_entry)
+            .readdirplus(ctx, inode, handle, size, offset, |dir_entry, entry| {
+                if self.listed(inode, dir_entry.name, Some(entry.inode)) {
+                    add_entry(dir_entry, entry)
+                } else {
+                    // The passthrough looked the entry up for this reply, and
+                    // the guest never learns its inode to forget it. Inode 0
+                    // is an entry without attributes, which took no lookup.
+                    if entry.inode != 0 {
+                        self.inner.forget(ctx, entry.inode, 1);
+                    }
+                    Ok(1)
+                }
+            })
     }
 
     fn fsyncdir(

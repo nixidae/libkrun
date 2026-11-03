@@ -1,3 +1,4 @@
+pub mod allowlist;
 mod augment_fs;
 mod device;
 #[allow(dead_code)]
