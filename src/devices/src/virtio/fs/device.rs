@@ -151,9 +151,6 @@ impl Fs {
         let Some(cfg) = self.passthrough_cfg.as_ref() else {
             return Ok(false);
         };
-        if !self.read_only {
-            return Ok(false);
-        }
         let root = std::path::Path::new(&cfg.root_dir);
         self.allowlist = Some(Arc::new(Allowlist::from_file(root, file)?));
         Ok(true)

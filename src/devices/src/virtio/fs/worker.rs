@@ -21,16 +21,17 @@ use super::allowlist::Allowlist;
 use super::augment_fs::AugmentFs;
 use super::defs::{HPQ_INDEX, REQ_INDEX};
 use super::descriptor_utils::{Reader, Writer};
+use super::filtered::PassthroughFsFiltered;
 use super::inode_alloc::InodeAllocator;
 use super::null_fs::NullFs;
-use super::passthrough::{self, PassthroughFs};
+use super::passthrough;
 use super::read_only::PassthroughFsRo;
 use super::server::Server;
 use super::virtual_entry::VirtualDirEntry;
 use crate::virtio::{InterruptTransport, VirtioShmRegion};
 
 enum FsServer {
-    ReadWrite(Server<AugmentFs<PassthroughFs>>),
+    ReadWrite(Server<AugmentFs<PassthroughFsFiltered>>),
     ReadOnly(Server<AugmentFs<PassthroughFsRo>>),
     Null(Server<AugmentFs<NullFs>>),
 }
@@ -120,7 +121,7 @@ impl FsWorker {
                 )
             }
             Some(cfg) => {
-                let inner = PassthroughFs::new(cfg, inode_alloc.clone())?;
+                let inner = PassthroughFsFiltered::new(cfg, inode_alloc.clone(), allowlist)?;
                 FsServer::ReadWrite(Server::new(AugmentFs::new(
                     inner,
                     &inode_alloc,

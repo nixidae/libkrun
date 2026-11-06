@@ -710,7 +710,12 @@ impl<'a> FsDevice<'a> {
     /// appending them. The guest's kernel may keep a negative dentry for a
     /// name it looked up before; dropping the guest's caches clears it.
     ///
-    /// A writable share or a NullFs device returns `InvalidParam`.
+    /// On a writable share the guest may also not add, remove or rename a
+    /// name in a directory above a listed path, nor change its attributes
+    /// (EACCES); below a listed path it writes as the host's permissions
+    /// allow. A file's parent can be shared this way with the file alone.
+    ///
+    /// A NullFs device returns `InvalidParam`.
     pub fn set_allowlist_file(&mut self, path: &str) -> Result<(), VmmError> {
         match self
             .inner

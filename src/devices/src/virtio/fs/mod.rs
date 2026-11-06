@@ -3,6 +3,7 @@ mod augment_fs;
 mod device;
 #[allow(dead_code)]
 mod filesystem;
+mod filtered;
 pub mod fuse;
 mod inode_alloc;
 #[allow(dead_code)]
