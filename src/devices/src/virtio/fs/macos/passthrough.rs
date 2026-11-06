@@ -1767,6 +1767,11 @@ impl FileSystem for PassthroughFs {
         _flags: u32,
     ) -> io::Result<usize> {
         debug!("read: {inode:?}");
+        // Handles start at 1: 0 is a file the kernel opened with no message (ZERO_MESSAGE_OPEN).
+        if handle == 0 {
+            let f = self.open_inode(inode, libc::O_RDONLY)?;
+            return w.write_from(&f, size as usize, offset);
+        }
         let data = self
             .handles
             .read()

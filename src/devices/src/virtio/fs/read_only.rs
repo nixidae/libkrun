@@ -13,12 +13,13 @@ use crossbeam_channel::Sender;
 use std::ffi::CStr;
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::AtomicI32;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::Duration;
 
 #[cfg(target_os = "macos")]
 use utils::worker_message::WorkerMessage;
 
+use super::CachePolicy;
 use super::allowlist::{self, Allowlist, Visibility};
 use super::filesystem::{
     Context, DirEntry, Entry, Extensions, FileSystem, FsOptions, GetxattrReply, ListxattrReply,
@@ -59,6 +60,13 @@ pub struct PassthroughFsRo {
     inner: PassthroughFs,
     allowlist: Option<Arc<Allowlist>>,
     negative_timeout: Duration,
+    /// CachePolicy::Always: nothing in the share changes while the guest runs. The guest then
+    /// caches symlink targets, opens a file with no message, and never flushes: each of those
+    /// was a round trip per open, measured at 48k OPEN and RELEASE, 41k FLUSH and 22k READLINK
+    /// over one compile in a guest.
+    unchanging: bool,
+    /// The kernel took ZERO_MESSAGE_OPEN, so `open` answers ENOSYS and no handle exists.
+    no_open: AtomicBool,
 }
 
 impl PassthroughFsRo {
@@ -68,10 +76,13 @@ impl PassthroughFsRo {
         allowlist: Option<Arc<Allowlist>>,
         negative_timeout: Duration,
     ) -> io::Result<Self> {
+        let unchanging = matches!(cfg.cache_policy, CachePolicy::Always);
         Ok(Self {
             inner: PassthroughFs::new(cfg, inode_alloc)?,
             allowlist,
             negative_timeout,
+            unchanging,
+            no_open: AtomicBool::new(false),
         })
     }
 
@@ -101,9 +112,16 @@ impl FileSystem for PassthroughFsRo {
     // --- Delegated read-only operations ---
 
     fn init(&self, capable: FsOptions) -> io::Result<FsOptions> {
-        let opts = self.inner.init(capable)?;
         // Strip WRITEBACK_CACHE to prevent the guest kernel from buffering writes.
-        Ok(opts & !FsOptions::WRITEBACK_CACHE)
+        let mut opts = self.inner.init(capable)? & !FsOptions::WRITEBACK_CACHE;
+        if self.unchanging {
+            opts |= capable & FsOptions::CACHE_SYMLINKS;
+            if capable.contains(FsOptions::ZERO_MESSAGE_OPEN) {
+                opts |= FsOptions::ZERO_MESSAGE_OPEN;
+                self.no_open.store(true, Ordering::Relaxed);
+            }
+        }
+        Ok(opts)
     }
 
     fn destroy(&self) {
@@ -149,6 +167,11 @@ impl FileSystem for PassthroughFsRo {
         flags: u32,
     ) -> io::Result<(Option<Handle>, OpenOptions)> {
         let ro_flags = read_only_open_flags(flags)?;
+        // The kernel reads ENOSYS as success and stops sending `open` and `release`; the
+        // passthrough then reads by inode, and a DAX mapping never needed a handle.
+        if self.no_open.load(Ordering::Relaxed) {
+            return Err(linux_errno::enosys());
+        }
         self.inner.open(ctx, inode, kill_priv, ro_flags)
     }
 
@@ -168,6 +191,10 @@ impl FileSystem for PassthroughFsRo {
     }
 
     fn flush(&self, ctx: Context, inode: Inode, handle: Handle, lock_owner: u64) -> io::Result<()> {
+        // Nothing to flush on a read-only share. ENOSYS stops the kernel sending any (`no_flush`).
+        if self.unchanging {
+            return Err(linux_errno::enosys());
+        }
         self.inner.flush(ctx, inode, handle, lock_owner)
     }
 
