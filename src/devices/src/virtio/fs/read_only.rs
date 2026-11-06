@@ -19,7 +19,7 @@ use std::time::Duration;
 #[cfg(target_os = "macos")]
 use utils::worker_message::WorkerMessage;
 
-use super::allowlist::{Allowlist, Visibility};
+use super::allowlist::{self, Allowlist, Visibility};
 use super::filesystem::{
     Context, DirEntry, Entry, Extensions, FileSystem, FsOptions, GetxattrReply, ListxattrReply,
     OpenOptions, SetattrValid, ZeroCopyReader, ZeroCopyWriter,
@@ -58,6 +58,7 @@ fn read_only_open_flags(flags: u32) -> io::Result<u32> {
 pub struct PassthroughFsRo {
     inner: PassthroughFs,
     allowlist: Option<Arc<Allowlist>>,
+    negative_timeout: Duration,
 }
 
 impl PassthroughFsRo {
@@ -65,10 +66,12 @@ impl PassthroughFsRo {
         cfg: passthrough::Config,
         inode_alloc: Arc<InodeAllocator>,
         allowlist: Option<Arc<Allowlist>>,
+        negative_timeout: Duration,
     ) -> io::Result<Self> {
         Ok(Self {
             inner: PassthroughFs::new(cfg, inode_alloc)?,
             allowlist,
+            negative_timeout,
         })
     }
 
@@ -108,20 +111,13 @@ impl FileSystem for PassthroughFsRo {
     }
 
     fn lookup(&self, ctx: Context, parent: Inode, name: &CStr) -> io::Result<Entry> {
-        let Some(allowlist) = &self.allowlist else {
-            return self.inner.lookup(ctx, parent, name);
-        };
-        match allowlist.visibility(parent, name.to_bytes()) {
-            Visibility::Hidden => Err(linux_errno::enoent()),
-            Visibility::Unfiltered | Visibility::Shown { partial: false } => {
-                self.inner.lookup(ctx, parent, name)
-            }
-            Visibility::Shown { partial: true } => {
-                let entry = self.inner.lookup(ctx, parent, name)?;
-                allowlist.record(parent, name.to_bytes(), entry.inode);
-                Ok(entry)
-            }
-        }
+        allowlist::lookup(
+            self.allowlist.as_deref(),
+            self.negative_timeout,
+            parent,
+            name.to_bytes(),
+            || self.inner.lookup(ctx, parent, name),
+        )
     }
 
     fn forget(&self, ctx: Context, inode: Inode, count: u64) {

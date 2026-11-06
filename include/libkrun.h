@@ -308,6 +308,20 @@ typedef KrunResult (*krun_fs_device_set_cache_policy_fn)(KrunFsDevice handle, ui
 KrunResult krun_fs_device_set_allowlist_file(KrunFsDevice handle, KrunStr path, KrunError* err_out);
 typedef KrunResult (*krun_fs_device_set_allowlist_file_fn)(KrunFsDevice handle, KrunStr path, KrunError* err_out);
 /**
+ * Let the guest cache a lookup that finds nothing for `millis` milliseconds: a name missing
+ * from the host directory, or one the allowlist hides. Zero, the default, sends every such
+ * lookup to the host again, which a compiler's include search or a shell's `PATH` search
+ * repeats many thousands of times.
+ *
+ * virtio-fs has no queue for the host to drop a guest's cached entry, so a name that appears
+ * later, in the directory or appended to the allowlist, stays missing in the guest until its
+ * entry expires. Use it where names do not appear while the guest runs.
+ *
+ * A NullFs device returns `InvalidParam`.
+ */
+KrunResult krun_fs_device_set_negative_timeout_ms(KrunFsDevice handle, uint64_t millis, KrunError* err_out);
+typedef KrunResult (*krun_fs_device_set_negative_timeout_ms_fn)(KrunFsDevice handle, uint64_t millis, KrunError* err_out);
+/**
  * Answer the ioctls Rosetta for Linux sends to the share that holds it, as
  * Virtualization.framework does. Share the host's
  * `/Library/Apple/usr/libexec/oah/RosettaLinux` and run the vCPUs in the TSO memory model

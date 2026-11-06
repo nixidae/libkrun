@@ -23,7 +23,9 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
+use super::filesystem::Entry;
 use super::fuse::ROOT_ID;
+use crate::virtio::linux_errno;
 
 type Inode = u64;
 type Name = Vec<u8>;
@@ -251,6 +253,46 @@ impl Allowlist {
     }
 }
 
+/// `lookup` of `name` in `parent` through `allowlist`, with `inner` the share's own lookup.
+///
+/// With a `negative` timeout above zero, a name that does not exist and a name the allowlist
+/// hides are negative entries the guest caches that long. virtio-fs has no notification queue,
+/// so the host cannot drop a cached entry: a path appended to the allowlist shows only once its
+/// negative entry expires. With zero, both are `ENOENT`, as a share without the timeout answers.
+pub fn lookup(
+    allowlist: Option<&Allowlist>,
+    negative: std::time::Duration,
+    parent: Inode,
+    name: &[u8],
+    inner: impl FnOnce() -> io::Result<Entry>,
+) -> io::Result<Entry> {
+    let missing = || {
+        if negative.is_zero() {
+            Err(linux_errno::enoent())
+        } else {
+            Ok(Entry::negative(negative))
+        }
+    };
+    let partial = match allowlist.map(|a| a.visibility(parent, name)) {
+        None | Some(Visibility::Unfiltered | Visibility::Shown { partial: false }) => false,
+        Some(Visibility::Shown { partial: true }) => true,
+        Some(Visibility::Hidden) => return missing(),
+    };
+    let entry = match inner() {
+        Err(e)
+            if e.raw_os_error() == Some(libc::ENOENT)
+                || e.raw_os_error() == linux_errno::enoent().raw_os_error() =>
+        {
+            return missing();
+        }
+        result => result?,
+    };
+    if partial && let Some(allowlist) = allowlist {
+        allowlist.record(parent, name, entry.inode);
+    }
+    Ok(entry)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,5 +378,58 @@ mod tests {
             Visibility::Shown { partial: false }
         );
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn found(inode: u64) -> io::Result<Entry> {
+        Ok(Entry {
+            inode,
+            ..Entry::without_attributes()
+        })
+    }
+
+    fn absent() -> io::Result<Entry> {
+        Err(io::Error::from_raw_os_error(libc::ENOENT))
+    }
+
+    const NEGATIVE: std::time::Duration = std::time::Duration::from_secs(60);
+
+    #[test]
+    fn a_missing_name_is_a_cached_negative_entry_only_with_a_timeout() {
+        let zero = std::time::Duration::ZERO;
+        let err = lookup(None, zero, ROOT_ID, b"x", absent)
+            .err()
+            .expect("an error");
+        assert_eq!(err.raw_os_error(), linux_errno::enoent().raw_os_error());
+        let entry = lookup(None, NEGATIVE, ROOT_ID, b"x", absent).unwrap();
+        assert_eq!((entry.inode, entry.entry_timeout), (0, NEGATIVE));
+    }
+
+    #[test]
+    fn a_hidden_name_is_negative_and_never_reaches_the_share() {
+        let list = store();
+        let entry = lookup(Some(&list), NEGATIVE, ROOT_ID, b"var", || {
+            panic!("a hidden name must not be looked up")
+        })
+        .unwrap();
+        assert_eq!((entry.inode, entry.entry_timeout), (0, NEGATIVE));
+    }
+
+    #[test]
+    fn a_found_partial_directory_is_still_recorded() {
+        let list = store();
+        let entry = lookup(Some(&list), NEGATIVE, ROOT_ID, b"store", || found(7)).unwrap();
+        assert_eq!(entry.inode, 7);
+        assert!(list.is_partial(7));
+        assert_eq!(list.visibility(7, b"ccc-other"), Visibility::Hidden);
+    }
+
+    #[test]
+    fn another_error_is_not_turned_into_a_negative_entry() {
+        let err = lookup(None, NEGATIVE, ROOT_ID, b"x", || {
+            Err(io::Error::from_raw_os_error(libc::EACCES))
+        })
+        .err()
+        .expect("an error");
+        assert_eq!(err.raw_os_error(), Some(libc::EACCES));
     }
 }

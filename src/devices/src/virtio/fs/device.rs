@@ -54,6 +54,7 @@ pub struct Fs {
     passthrough_cfg: Option<passthrough::Config>,
     read_only: bool,
     allowlist: Option<Arc<Allowlist>>,
+    negative_timeout: Duration,
     virtual_entries: Vec<VirtualDirEntry<'static>>,
     worker_thread: Option<JoinHandle<()>>,
     worker_stopfd: EventFd,
@@ -95,6 +96,7 @@ impl Fs {
             passthrough_cfg: fs_cfg,
             read_only,
             allowlist: None,
+            negative_timeout: Duration::ZERO,
             virtual_entries,
             worker_thread: None,
             worker_stopfd: EventFd::new(EFD_NONBLOCK).map_err(FsError::EventFd)?,
@@ -154,6 +156,16 @@ impl Fs {
         let root = std::path::Path::new(&cfg.root_dir);
         self.allowlist = Some(Arc::new(Allowlist::from_file(root, file)?));
         Ok(true)
+    }
+
+    /// Caches a missing or hidden name in the guest for `timeout` (`allowlist::lookup`). False for
+    /// a device with no host directory.
+    pub fn set_negative_timeout(&mut self, timeout: Duration) -> bool {
+        if self.passthrough_cfg.is_none() {
+            return false;
+        }
+        self.negative_timeout = timeout;
+        true
     }
 
     #[cfg(target_os = "macos")]
@@ -279,6 +291,7 @@ impl VirtioDevice for Fs {
             self.passthrough_cfg.clone(),
             self.read_only,
             self.allowlist.clone(),
+            self.negative_timeout,
             virtual_entries,
             self.worker_stopfd.try_clone().unwrap(),
             self.exit_code.clone(),

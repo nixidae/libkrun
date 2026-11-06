@@ -71,6 +71,15 @@ impl Entry {
             entry_timeout: Duration::ZERO,
         }
     }
+
+    /// A `lookup` reply for a name that does not exist, which the guest caches for `timeout`. An
+    /// `ENOENT` error is never cached: each later lookup of the name reaches the server again.
+    pub fn negative(timeout: Duration) -> Self {
+        Self {
+            entry_timeout: timeout,
+            ..Self::without_attributes()
+        }
+    }
 }
 
 impl From<Entry> for fuse::EntryOut {

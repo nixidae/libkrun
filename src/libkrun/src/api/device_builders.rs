@@ -729,6 +729,28 @@ impl<'a> FsDevice<'a> {
         }
     }
 
+    /// Let the guest cache a lookup that finds nothing for `millis` milliseconds: a name missing
+    /// from the host directory, or one the allowlist hides. Zero, the default, sends every such
+    /// lookup to the host again, which a compiler's include search or a shell's `PATH` search
+    /// repeats many thousands of times.
+    ///
+    /// virtio-fs has no queue for the host to drop a guest's cached entry, so a name that appears
+    /// later, in the directory or appended to the allowlist, stays missing in the guest until its
+    /// entry expires. Use it where names do not appear while the guest runs.
+    ///
+    /// A NullFs device returns `InvalidParam`.
+    pub fn set_negative_timeout_ms(&mut self, millis: u64) -> Result<(), VmmError> {
+        if !self
+            .inner
+            .lock()
+            .unwrap()
+            .set_negative_timeout(std::time::Duration::from_millis(millis))
+        {
+            return Err(VmmError::InvalidParam());
+        }
+        Ok(())
+    }
+
     /// Answer the ioctls Rosetta for Linux sends to the share that holds it, as
     /// Virtualization.framework does. Share the host's
     /// `/Library/Apple/usr/libexec/oah/RosettaLinux` and run the vCPUs in the TSO memory model

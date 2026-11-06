@@ -770,6 +770,36 @@
           "ffi_name": "krun_fs_device_set_allowlist_file"
         },
         {
+          "name": "set_negative_timeout_ms",
+          "doc": [
+            " Let the guest cache a lookup that finds nothing for `millis` milliseconds: a name missing",
+            " from the host directory, or one the allowlist hides. Zero, the default, sends every such",
+            " lookup to the host again, which a compiler's include search or a shell's `PATH` search",
+            " repeats many thousands of times.",
+            "",
+            " virtio-fs has no queue for the host to drop a guest's cached entry, so a name that appears",
+            " later, in the directory or appended to the allowlist, stays missing in the guest until its",
+            " entry expires. Use it where names do not appear while the guest runs.",
+            "",
+            " A NullFs device returns `InvalidParam`."
+          ],
+          "receiver": "mut",
+          "params": [
+            {
+              "name": "millis",
+              "param_kind": "regular",
+              "type": "u64"
+            }
+          ],
+          "ret": {
+            "return_kind": "result",
+            "ok": null,
+            "err_type": "VmmError",
+            "c_convention": "out_param"
+          },
+          "ffi_name": "krun_fs_device_set_negative_timeout_ms"
+        },
+        {
           "name": "set_rosetta",
           "doc": [
             " Answer the ioctls Rosetta for Linux sends to the share that holds it, as",

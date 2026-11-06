@@ -9,6 +9,7 @@ use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::sync::atomic::AtomicI32;
 use std::thread;
+use std::time::Duration;
 #[cfg(windows)]
 use utils::windows::AsRawFd;
 
@@ -104,6 +105,7 @@ impl FsWorker {
         passthrough_cfg: Option<passthrough::Config>,
         read_only: bool,
         allowlist: Option<Arc<Allowlist>>,
+        negative_timeout: Duration,
         virtual_entries: Vec<VirtualDirEntry<'static>>,
         stop_fd: EventFd,
         exit_code: Arc<AtomicI32>,
@@ -112,7 +114,8 @@ impl FsWorker {
         let inode_alloc = Arc::new(InodeAllocator::new());
         let server = match passthrough_cfg {
             Some(cfg) if read_only => {
-                let inner = PassthroughFsRo::new(cfg, inode_alloc.clone(), allowlist)?;
+                let inner =
+                    PassthroughFsRo::new(cfg, inode_alloc.clone(), allowlist, negative_timeout)?;
                 // Read-only only: on macOS a writable window needs a MAP_SHARED mapping,
                 // which hv_vm_map() refuses.
                 FsServer::ReadOnly(
@@ -121,7 +124,12 @@ impl FsWorker {
                 )
             }
             Some(cfg) => {
-                let inner = PassthroughFsFiltered::new(cfg, inode_alloc.clone(), allowlist)?;
+                let inner = PassthroughFsFiltered::new(
+                    cfg,
+                    inode_alloc.clone(),
+                    allowlist,
+                    negative_timeout,
+                )?;
                 FsServer::ReadWrite(Server::new(AugmentFs::new(
                     inner,
                     &inode_alloc,
