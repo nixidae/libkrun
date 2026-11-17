@@ -232,13 +232,13 @@ impl Epoll {
                     kevs.push(Kevent::new(
                         fd as usize,
                         libc::EVFILT_READ,
-                        libc::EV_DELETE,
+                        libc::EV_DELETE | libc::EV_RECEIPT,
                         event.u64,
                     ));
                     kevs.push(Kevent::new(
                         fd as usize,
                         libc::EVFILT_WRITE,
-                        libc::EV_DELETE,
+                        libc::EV_DELETE | libc::EV_RECEIPT,
                         event.u64,
                     ));
                 } else {
@@ -247,7 +247,7 @@ impl Epoll {
                         kevs.push(Kevent::new(
                             fd as usize,
                             libc::EVFILT_READ,
-                            libc::EV_DELETE,
+                            libc::EV_DELETE | libc::EV_RECEIPT,
                             event.u64,
                         ));
                     }
@@ -256,18 +256,24 @@ impl Epoll {
                         kevs.push(Kevent::new(
                             fd as usize,
                             libc::EVFILT_WRITE,
-                            libc::EV_DELETE,
+                            libc::EV_DELETE | libc::EV_RECEIPT,
                             event.u64,
                         ));
                     }
                 }
+                // EV_RECEIPT, and room for the receipts: without them, a
+                // filter that is not registered (ENOENT) makes kevent()
+                // return -1 and skip the rest of the changelist. A WRITE
+                // filter after an absent READ one then stays, and a closed
+                // socket reports writable and EOF forever.
+                let mut receipts = vec![Kevent::default(); kevs.len()];
                 let _ = unsafe {
                     libc::kevent(
                         self.queue,
                         kevs.as_ptr() as *const libc::kevent,
                         kevs.len() as i32,
-                        ptr::null_mut(),
-                        0,
+                        receipts.as_mut_ptr() as *mut libc::kevent,
+                        receipts.len() as i32,
                         ptr::null(),
                     )
                 };
@@ -480,5 +486,24 @@ mod tests {
         assert_eq!(ev_count, 1);
         assert_eq!(ready_events[0].data(), event_fd_1.as_raw_fd() as u64);
         assert_eq!(ready_events[0].events(), EventSet::IN.bits());
+    }
+
+    #[test]
+    fn test_delete_all_removes_write_without_read() {
+        // Delete with no events drops READ and WRITE. READ is not
+        // registered here; WRITE must go all the same.
+        let mut epoll = Epoll::new().unwrap();
+        let (a, _b) = std::os::unix::net::UnixStream::pair().unwrap();
+        let fd = a.as_raw_fd();
+        epoll
+            .ctl(ControlOperation::Add, fd, &EpollEvent::new(EventSet::OUT, 7))
+            .unwrap();
+        let mut ready_events = vec![EpollEvent::default(); 8];
+        assert_eq!(epoll.wait(8, 250, &mut ready_events[..]).unwrap(), 1);
+
+        epoll
+            .ctl(ControlOperation::Delete, fd, &EpollEvent::default())
+            .unwrap();
+        assert_eq!(epoll.wait(8, 250, &mut ready_events[..]).unwrap(), 0);
     }
 }
