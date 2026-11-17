@@ -67,13 +67,15 @@ fn set_nosigpipe(_fd: &OwnedFd) {
     }
 }
 
+/// Non-blocking, accepted sockets too: `send_now` must never block, and
+/// macOS ignores MSG_DONTWAIT on a send to a blocking AF_UNIX stream.
 pub(crate) fn switch_to_connected(proxy: &mut super::UnixProxy) {
     proxy.status = ProxyStatus::Connected;
     match fcntl(&proxy.fd, FcntlArg::F_GETFL) {
         Ok(flags) => match OFlag::from_bits(flags) {
             Some(flags) => {
-                if let Err(e) = fcntl(&proxy.fd, FcntlArg::F_SETFL(flags & !OFlag::O_NONBLOCK)) {
-                    warn!("error switching to blocking: id={}, err={}", proxy.id, e);
+                if let Err(e) = fcntl(&proxy.fd, FcntlArg::F_SETFL(flags | OFlag::O_NONBLOCK)) {
+                    warn!("error switching to non-blocking: id={}, err={}", proxy.id, e);
                 }
             }
             None => error!("invalid fd flags id={}", proxy.id),
@@ -223,7 +225,8 @@ fn wanted_events(proxy: &super::UnixProxy) -> EventSet {
     events
 }
 
-/// Never blocks: the muxer thread serves every connection.
+/// Never blocks: the muxer thread serves every connection. The socket is
+/// O_NONBLOCK as well (`switch_to_connected`).
 fn send_now(proxy: &super::UnixProxy, buf: &[u8]) -> nix::Result<usize> {
     #[cfg(target_os = "macos")]
     let flags = MsgFlags::MSG_DONTWAIT;
