@@ -39,6 +39,7 @@ pub struct UnixProxy {
     pub(crate) local_port: u32,
     pub(crate) control_port: u32,
     pub(crate) peer_shutdown: u32,
+    pub(crate) host_read_closed: bool,
     pub(crate) peer_fwd_cnt: Wrapping<u32>,
     pub(crate) peer_buf_alloc: u32,
     pub(crate) tx_cnt: Wrapping<u32>,
@@ -73,6 +74,7 @@ impl UnixProxy {
             local_port,
             control_port,
             peer_shutdown: 0,
+            host_read_closed: false,
             peer_fwd_cnt: Wrapping(0),
             peer_buf_alloc: 0,
             tx_cnt: Wrapping(0),
@@ -101,6 +103,7 @@ impl UnixProxy {
             peer_port,
             control_port: 0,
             peer_shutdown: 0,
+            host_read_closed: false,
             fd,
             status: ProxyStatus::ReverseInit,
             mem,
@@ -139,7 +142,10 @@ impl UnixProxy {
         let mut wait_credit = false;
         let mut queue = self.queue.lock().unwrap();
 
-        while let Some(head) = queue.pop(&self.mem) {
+        while !self.host_read_closed {
+            let Some(head) = queue.pop(&self.mem) else {
+                break;
+            };
             let len = match VsockPacket::from_rx_virtq_head(&head) {
                 Ok(mut pkt) => match sys::recv_to_pkt(self, &mut pkt) {
                     RecvPkt::WaitForCredit => {
@@ -152,9 +158,16 @@ impl UnixProxy {
                         pkt.set_len(cnt as u32);
                         pkt.hdr().len() + cnt
                     }
+                    // A half-close, as tsi_stream: the guest may still
+                    // send. A reset here loses what the guest sends after
+                    // the host's EOF, as iperf3's results after the test.
                     RecvPkt::Close => {
-                        self.status = ProxyStatus::Closed;
-                        0
+                        self.host_read_closed = true;
+                        self.init_data_pkt(&mut pkt);
+                        pkt.set_op(uapi::VSOCK_OP_SHUTDOWN)
+                            .set_flags(uapi::VSOCK_FLAGS_SHUTDOWN_SEND)
+                            .set_len(0);
+                        pkt.hdr().len()
                     }
                     RecvPkt::Error => 0,
                 },

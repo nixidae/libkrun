@@ -212,6 +212,7 @@ pub(crate) fn confirm_connect(
 
 pub(crate) fn sendmsg(proxy: &mut super::UnixProxy, pkt: &VsockPacket) -> ProxyUpdate {
     let mut update = ProxyUpdate::default();
+    let mut host_gone = false;
 
     let ret = if let Some(buf) = pkt.buf() {
         #[cfg(target_os = "macos")]
@@ -229,6 +230,8 @@ pub(crate) fn sendmsg(proxy: &mut super::UnixProxy, pkt: &VsockPacket) -> ProxyU
                 sent as i32
             }
             Err(err) => {
+                host_gone = !matches!(err, Errno::EAGAIN | Errno::EINTR);
+
                 #[cfg(target_os = "macos")]
                 let errno = -linux_errno_raw(err as i32);
 
@@ -240,6 +243,18 @@ pub(crate) fn sendmsg(proxy: &mut super::UnixProxy, pkt: &VsockPacket) -> ProxyU
     } else {
         -libc::EINVAL
     };
+
+    // The host end is gone. EOF on its read side is only a half-close,
+    // so this is where the guest learns it.
+    if host_gone {
+        debug!("sendmsg: host end closed, sending reset: id={}", proxy.id);
+        proxy.push_reset();
+        proxy.status = ProxyStatus::Closed;
+        update.polling = Some((proxy.id, proxy.fd.as_raw_fd(), EventSet::empty()));
+        update.remove_proxy = ProxyRemoval::Deferred;
+        update.signal_queue = true;
+        return update;
+    }
 
     if ret > 0 && (proxy.tx_cnt - proxy.last_tx_cnt_sent).0 >= proxy.peer_buf_alloc / 2 {
         debug!(
@@ -273,7 +288,10 @@ pub(crate) fn update_peer_credit(proxy: &mut super::UnixProxy, pkt: &VsockPacket
     proxy.peer_buf_alloc = pkt.buf_alloc();
     proxy.peer_fwd_cnt = Wrapping(pkt.fwd_cnt());
 
-    if proxy.status != ProxyStatus::WaitingCreditUpdate || proxy.peer_avail_credit() == 0 {
+    if proxy.host_read_closed
+        || proxy.status != ProxyStatus::WaitingCreditUpdate
+        || proxy.peer_avail_credit() == 0
+    {
         return ProxyUpdate::default();
     }
 
@@ -410,8 +428,8 @@ pub(crate) fn process_event(proxy: &mut super::UnixProxy, evset: EventSet) -> Pr
                 update.polling = Some((proxy.id, proxy.fd.as_raw_fd(), EventSet::empty()));
                 update.remove_proxy = ProxyRemoval::Deferred;
                 return update;
-            } else if proxy.status == ProxyStatus::WaitingCreditUpdate {
-                debug!("process_event: WaitingCreditUpdate");
+            } else if proxy.host_read_closed || proxy.status == ProxyStatus::WaitingCreditUpdate {
+                debug!("process_event: disabling read polling");
                 update.polling = Some((proxy.id, proxy.fd.as_raw_fd(), EventSet::empty()));
             }
         } else {
