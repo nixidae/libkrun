@@ -43,13 +43,21 @@ pub(crate) fn create_socket(id: u64) -> Result<PlatformHandle, ProxyError> {
         Err(e) => error!("couldn't obtain fd flags id={id}, err={e}"),
     };
 
+    set_nosigpipe(&fd);
+    Ok(fd)
+}
+
+/// `sendmsg` sends with no flags on macOS, so every stream socket needs
+/// this, the accepted ones too: else a send after the peer closed raises
+/// SIGPIPE and the VMM dies.
+fn set_nosigpipe(_fd: &OwnedFd) {
     #[cfg(target_os = "macos")]
     {
         // nix doesn't provide an abstraction for SO_NOSIGPIPE, fall back to libc.
         let option_value: libc::c_int = 1;
         unsafe {
             libc::setsockopt(
-                fd.as_raw_fd(),
+                _fd.as_raw_fd(),
                 libc::SOL_SOCKET,
                 libc::SO_NOSIGPIPE,
                 &option_value as *const _ as *const libc::c_void,
@@ -57,8 +65,6 @@ pub(crate) fn create_socket(id: u64) -> Result<PlatformHandle, ProxyError> {
             )
         };
     }
-
-    Ok(fd)
 }
 
 pub(crate) fn switch_to_connected(proxy: &mut super::UnixProxy) {
@@ -477,6 +483,7 @@ pub(crate) fn process_acceptor_event(
             Ok(accept_fd) => {
                 // Safe because we've just obtained the FD from the `accept` call above.
                 let new_fd = unsafe { OwnedFd::from_raw_fd(accept_fd) };
+                set_nosigpipe(&new_fd);
                 update.new_proxy = Some((
                     proxy.peer_port,
                     new_fd,
