@@ -98,7 +98,7 @@ pub fn push_packet(
             }
         }
     } else {
-        error!("couldn't push pkt to queue, adding it to rxq");
+        error!("couldn't push pkt to queue, adding it to rxq: {rx:?}");
         drop(queue);
         rxq_mutex.lock().unwrap().push(rx);
     }
@@ -220,7 +220,7 @@ impl VsockMuxer {
                 }
             }
         } else {
-            error!("couldn't push pkt to queue, adding it to rxq");
+            error!("couldn't push pkt to queue, adding it to rxq (muxer): {rx:?}");
             drop(queue);
             self.rxq.lock().unwrap().push(rx);
         }
