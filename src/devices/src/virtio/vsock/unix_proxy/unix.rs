@@ -210,71 +210,136 @@ pub(crate) fn confirm_connect(
     None
 }
 
-pub(crate) fn sendmsg(proxy: &mut super::UnixProxy, pkt: &VsockPacket) -> ProxyUpdate {
-    let mut update = ProxyUpdate::default();
-    let mut host_gone = false;
+/// What the host socket is polled for: IN while the proxy reads it, OUT
+/// while guest data waits for it.
+fn wanted_events(proxy: &super::UnixProxy) -> EventSet {
+    let mut events = EventSet::empty();
+    if proxy.status == ProxyStatus::Connected && !proxy.host_read_closed {
+        events |= EventSet::IN;
+    }
+    if !proxy.pending.is_empty() {
+        events |= EventSet::OUT;
+    }
+    events
+}
 
-    let ret = if let Some(buf) = pkt.buf() {
-        #[cfg(target_os = "macos")]
-        let flags = MsgFlags::empty();
+/// Never blocks: the muxer thread serves every connection.
+fn send_now(proxy: &super::UnixProxy, buf: &[u8]) -> nix::Result<usize> {
+    #[cfg(target_os = "macos")]
+    let flags = MsgFlags::MSG_DONTWAIT;
 
-        #[cfg(target_os = "linux")]
-        let flags = MsgFlags::MSG_NOSIGNAL;
+    #[cfg(target_os = "linux")]
+    let flags = MsgFlags::MSG_DONTWAIT | MsgFlags::MSG_NOSIGNAL;
 
-        match send(proxy.fd.as_raw_fd(), buf, flags) {
-            Ok(sent) => {
-                if sent != buf.len() {
-                    error!("couldn't set everything: buf={}, sent={}", buf.len(), sent);
-                }
-                proxy.tx_cnt += Wrapping(sent as u32);
-                sent as i32
-            }
-            Err(err) => {
-                host_gone = !matches!(err, Errno::EAGAIN | Errno::EINTR);
+    send(proxy.fd.as_raw_fd(), buf, flags)
+}
 
-                #[cfg(target_os = "macos")]
-                let errno = -linux_errno_raw(err as i32);
+/// The host end is gone. EOF on its read side is only a half-close, so a
+/// failed send is where the guest learns it.
+fn reset_host_gone(proxy: &mut super::UnixProxy, err: Errno) -> ProxyUpdate {
+    debug!(
+        "host end closed, sending reset: id={}, err={err}",
+        proxy.id
+    );
+    proxy.pending.clear();
+    proxy.push_reset();
+    proxy.status = ProxyStatus::Closed;
+    ProxyUpdate {
+        polling: Some((proxy.id, proxy.fd.as_raw_fd(), EventSet::empty())),
+        remove_proxy: ProxyRemoval::Deferred,
+        signal_queue: true,
+        ..Default::default()
+    }
+}
 
-                #[cfg(target_os = "linux")]
-                let errno = -(err as i32);
-                errno
-            }
-        }
-    } else {
-        -libc::EINVAL
+fn push_credit_update(proxy: &mut super::UnixProxy, update: &mut ProxyUpdate) {
+    if (proxy.tx_cnt - proxy.last_tx_cnt_sent).0 < proxy.peer_buf_alloc / 2 {
+        return;
+    }
+    debug!(
+        "sending credit update: id={}, tx_cnt={}, last_tx_cnt={}",
+        proxy.id, proxy.tx_cnt, proxy.last_tx_cnt_sent
+    );
+    proxy.last_tx_cnt_sent = proxy.tx_cnt;
+
+    let rx = MuxerRx::CreditUpdate {
+        local_port: proxy.local_port,
+        peer_port: proxy.peer_port,
+        fwd_cnt: proxy.tx_cnt.0,
     };
 
-    // The host end is gone. EOF on its read side is only a half-close,
-    // so this is where the guest learns it.
-    if host_gone {
-        debug!("sendmsg: host end closed, sending reset: id={}", proxy.id);
-        proxy.push_reset();
-        proxy.status = ProxyStatus::Closed;
-        update.polling = Some((proxy.id, proxy.fd.as_raw_fd(), EventSet::empty()));
-        update.remove_proxy = ProxyRemoval::Deferred;
-        update.signal_queue = true;
+    push_packet(proxy.cid, rx, &proxy.rxq, &proxy.queue, &proxy.mem);
+    update.signal_queue = true;
+}
+
+pub(crate) fn sendmsg(proxy: &mut super::UnixProxy, pkt: &VsockPacket) -> ProxyUpdate {
+    let mut update = ProxyUpdate::default();
+    let Some(buf) = pkt.buf() else {
         return update;
+    };
+
+    let was_pending = !proxy.pending.is_empty();
+    if was_pending {
+        proxy.pending.extend(buf);
+    } else {
+        match send_now(proxy, buf) {
+            Ok(sent) => {
+                proxy.tx_cnt += Wrapping(sent as u32);
+                proxy.pending.extend(&buf[sent..]);
+            }
+            Err(Errno::EAGAIN | Errno::EINTR) => proxy.pending.extend(buf),
+            Err(err) => return reset_host_gone(proxy, err),
+        }
     }
 
-    if ret > 0 && (proxy.tx_cnt - proxy.last_tx_cnt_sent).0 >= proxy.peer_buf_alloc / 2 {
+    if !was_pending && !proxy.pending.is_empty() {
         debug!(
-            "sending credit update: id={}, tx_cnt={}, last_tx_cnt={}",
-            proxy.id, proxy.tx_cnt, proxy.last_tx_cnt_sent
+            "sendmsg: host socket full, holding {} bytes: id={}",
+            proxy.pending.len(),
+            proxy.id
         );
-        proxy.last_tx_cnt_sent = proxy.tx_cnt;
-
-        let rx = MuxerRx::CreditUpdate {
-            local_port: pkt.dst_port(),
-            peer_port: pkt.src_port(),
-            fwd_cnt: proxy.tx_cnt.0,
-        };
-
-        push_packet(proxy.cid, rx, &proxy.rxq, &proxy.queue, &proxy.mem);
-        update.signal_queue = true;
+        update.polling = Some((proxy.id, proxy.fd.as_raw_fd(), wanted_events(proxy)));
     }
 
-    debug!("sendmsg ret={ret}");
+    push_credit_update(proxy, &mut update);
+    update
+}
 
+/// Send what the host socket takes of `pending`; once it is empty, apply
+/// a shutdown the guest asked for meanwhile.
+fn flush_pending(proxy: &mut super::UnixProxy) -> ProxyUpdate {
+    let mut update = ProxyUpdate::default();
+    while !proxy.pending.is_empty() {
+        let (front, _) = proxy.pending.as_slices();
+        match send_now(proxy, front) {
+            Ok(0) => break,
+            Ok(sent) => {
+                proxy.tx_cnt += Wrapping(sent as u32);
+                proxy.pending.drain(..sent);
+            }
+            Err(Errno::EAGAIN) => break,
+            Err(Errno::EINTR) => continue,
+            Err(err) => return reset_host_gone(proxy, err),
+        }
+    }
+    push_credit_update(proxy, &mut update);
+
+    if proxy.pending.is_empty() && proxy.deferred_shutdown != 0 {
+        let flags = std::mem::take(&mut proxy.deferred_shutdown);
+        shutdown_host(proxy, flags);
+        const BOTH: u32 =
+            super::uapi::VSOCK_FLAGS_SHUTDOWN_RCV | super::uapi::VSOCK_FLAGS_SHUTDOWN_SEND;
+        if proxy.peer_shutdown == BOTH {
+            proxy.push_reset();
+            proxy.status = ProxyStatus::Closed;
+            update.polling = Some((proxy.id, proxy.fd.as_raw_fd(), EventSet::empty()));
+            update.remove_proxy = ProxyRemoval::Deferred;
+            update.signal_queue = true;
+            return update;
+        }
+    }
+
+    update.polling = Some((proxy.id, proxy.fd.as_raw_fd(), wanted_events(proxy)));
     update
 }
 
@@ -298,7 +363,7 @@ pub(crate) fn update_peer_credit(proxy: &mut super::UnixProxy, pkt: &VsockPacket
     proxy.status = ProxyStatus::Connected;
 
     ProxyUpdate {
-        polling: Some((proxy.id, proxy.fd.as_raw_fd(), EventSet::IN)),
+        polling: Some((proxy.id, proxy.fd.as_raw_fd(), wanted_events(proxy))),
         ..Default::default()
     }
 }
@@ -331,14 +396,18 @@ pub(crate) fn process_op_response(proxy: &mut super::UnixProxy, pkt: &VsockPacke
     switch_to_connected(proxy);
 
     ProxyUpdate {
-        polling: Some((proxy.id, proxy.fd.as_raw_fd(), EventSet::IN)),
+        polling: Some((proxy.id, proxy.fd.as_raw_fd(), wanted_events(proxy))),
         ..Default::default()
     }
 }
 
 pub(crate) fn do_shutdown(proxy: &mut super::UnixProxy, pkt: &VsockPacket) {
-    let recv_off = pkt.flags() & super::uapi::VSOCK_FLAGS_SHUTDOWN_RCV != 0;
-    let send_off = pkt.flags() & super::uapi::VSOCK_FLAGS_SHUTDOWN_SEND != 0;
+    shutdown_host(proxy, pkt.flags());
+}
+
+fn shutdown_host(proxy: &mut super::UnixProxy, flags: u32) {
+    let recv_off = flags & super::uapi::VSOCK_FLAGS_SHUTDOWN_RCV != 0;
+    let send_off = flags & super::uapi::VSOCK_FLAGS_SHUTDOWN_SEND != 0;
 
     let how = if recv_off && send_off {
         Shutdown::Both
@@ -430,7 +499,7 @@ pub(crate) fn process_event(proxy: &mut super::UnixProxy, evset: EventSet) -> Pr
                 return update;
             } else if proxy.host_read_closed || proxy.status == ProxyStatus::WaitingCreditUpdate {
                 debug!("process_event: disabling read polling");
-                update.polling = Some((proxy.id, proxy.fd.as_raw_fd(), EventSet::empty()));
+                update.polling = Some((proxy.id, proxy.fd.as_raw_fd(), wanted_events(proxy)));
             }
         } else {
             debug!("EventSet::IN while not connected: {:?}", proxy.status);
@@ -444,8 +513,13 @@ pub(crate) fn process_event(proxy: &mut super::UnixProxy, evset: EventSet) -> Pr
             push_connect_rsp(proxy, 0);
             update.signal_queue = true;
             update.polling = Some((proxy.id, proxy.fd.as_raw_fd(), EventSet::IN));
+        } else if !proxy.pending.is_empty() {
+            let flushed = flush_pending(proxy);
+            update.signal_queue |= flushed.signal_queue;
+            update.polling = flushed.polling;
+            update.remove_proxy = flushed.remove_proxy;
         } else {
-            error!("EventSet::OUT while not connecting");
+            debug!("EventSet::OUT with nothing pending: id={}", proxy.id);
         }
     }
 

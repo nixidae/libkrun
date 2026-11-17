@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::num::Wrapping;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -40,6 +40,13 @@ pub struct UnixProxy {
     pub(crate) control_port: u32,
     pub(crate) peer_shutdown: u32,
     pub(crate) host_read_closed: bool,
+    /// Guest data the host socket did not take yet. The muxer serves
+    /// every connection from one thread, so a blocking send to one slow
+    /// host reader stalls them all. `tx_cnt` counts only what the host
+    /// took, so the guest's credit bounds this to `CONN_TX_BUF_SIZE`.
+    pub(crate) pending: VecDeque<u8>,
+    /// SHUTDOWN flags from the guest, held until `pending` is sent.
+    pub(crate) deferred_shutdown: u32,
     pub(crate) peer_fwd_cnt: Wrapping<u32>,
     pub(crate) peer_buf_alloc: u32,
     pub(crate) tx_cnt: Wrapping<u32>,
@@ -75,6 +82,8 @@ impl UnixProxy {
             control_port,
             peer_shutdown: 0,
             host_read_closed: false,
+            pending: VecDeque::new(),
+            deferred_shutdown: 0,
             peer_fwd_cnt: Wrapping(0),
             peer_buf_alloc: 0,
             tx_cnt: Wrapping(0),
@@ -104,6 +113,8 @@ impl UnixProxy {
             control_port: 0,
             peer_shutdown: 0,
             host_read_closed: false,
+            pending: VecDeque::new(),
+            deferred_shutdown: 0,
             fd,
             status: ProxyStatus::ReverseInit,
             mem,
@@ -281,6 +292,12 @@ impl Proxy for UnixProxy {
         }
 
         self.peer_shutdown |= shutdown;
+        // A shutdown before the pending data reached the host would cut
+        // it off. The flush that empties `pending` applies it.
+        if !self.pending.is_empty() {
+            self.deferred_shutdown |= shutdown;
+            return ProxyUpdate::default();
+        }
         sys::do_shutdown(self, pkt);
 
         if self.peer_shutdown != SHUTDOWN_MASK {
